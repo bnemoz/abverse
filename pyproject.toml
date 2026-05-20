@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ab-revtrans"
+name = "abverse"
 version = "0.1.0"
 description = "Germline-informed reverse translation of antibody amino acid sequences to nucleotide sequences"
 readme = "README.md"
