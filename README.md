@@ -1,5 +1,9 @@
 # abverse
 
+<p align="center">
+  <img src="abverse/logo.png" alt="abverse logo" width="300"/>
+</p>
+
 **Germline-informed reverse translation of antibody amino acid sequences to nucleotide sequences.**
 
 `abverse` is a companion package to [abstar](https://github.com/briney/abstar). It takes antibody amino acid sequences — common output from mass spectrometry, proteomics, or databases — and produces nucleotide sequences that are maximally faithful to the inferred germline, so that downstream `abstar` annotation (V/J assignment, mutation counts, CDR/FWR regions) reflects real somatic hypermutation rather than arbitrary codon choices.
@@ -154,7 +158,7 @@ The exact V-call rate of 75% reflects the fundamental ambiguity of assigning a s
 ## Development
 
 ```bash
-git clone https://github.com/<your-org>/abverse.git
+git clone https://github.com/bnemoz/abverse.git
 cd abverse
 pip install -e . --no-build-isolation
 pip install pytest
