@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 import tempfile
 import warnings
@@ -12,6 +11,7 @@ from typing import Iterable, Optional, Union
 
 import abutils
 
+from ._csv import parse_csv
 from ._germline_db import build_germline_aa_db
 from ._reconstruct import _reconstruct_batch
 from ._search import (
@@ -25,19 +25,33 @@ __all__ = ["reverse_translate"]
 
 SequenceInput = Union[str, abutils.Sequence, Iterable[abutils.Sequence]]
 
+_CSV_EXTENSIONS = (".csv", ".tsv")
+
 
 # ── Input normalisation ───────────────────────────────────────────────────────
 
-def _normalise_input(sequences: SequenceInput) -> dict[str, str]:
-    """Return {seq_id: aa_sequence} dict from any supported input format."""
+def _normalise_input(
+    sequences: SequenceInput,
+) -> tuple[dict[str, str], dict[str, dict]]:
+    """Return *(aa_seqs, pre_annotations)* from any supported input format.
+
+    pre_annotations maps seq_id → dict with optional keys:
+      v_call, j_call, v_qstart, v_qend, v_tstart, j_qstart, j_qend, j_tstart
+    It is empty when the input carries no pre-existing annotation.
+    """
     if isinstance(sequences, str):
-        # FASTA file path
-        if not os.path.isfile(sequences):
-            raise FileNotFoundError(f"Input FASTA not found: {sequences}")
-        seqs = abutils.io.read_fasta(sequences)
-        return {s.id: str(s.sequence).upper() for s in seqs}
+        path = sequences
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Input file not found: {path}")
+        if path.lower().endswith(_CSV_EXTENSIONS):
+            return parse_csv(path)
+        # FASTA
+        seqs = abutils.io.read_fasta(path)
+        return {s.id: str(s.sequence).upper() for s in seqs}, {}
+
     if isinstance(sequences, abutils.Sequence):
         sequences = [sequences]
+
     result: dict[str, str] = {}
     for i, s in enumerate(sequences):
         if isinstance(s, abutils.Sequence):
@@ -49,7 +63,7 @@ def _normalise_input(sequences: SequenceInput) -> dict[str, str]:
         else:
             raise TypeError(f"Unsupported sequence type: {type(s)}")
         result[sid] = seq
-    return result
+    return result, {}
 
 
 def _write_aa_fasta(aa_seqs: dict[str, str], path: str) -> None:
@@ -58,7 +72,7 @@ def _write_aa_fasta(aa_seqs: dict[str, str], path: str) -> None:
             fh.write(f">{sid}\n{seq}\n")
 
 
-# ── Record builder (merged DataFrame → list of dicts) ────────────────────────
+# ── Record builders ───────────────────────────────────────────────────────────
 
 def _df_to_records(merged_df, aa_seqs: dict[str, str]) -> list[dict]:
     records: list[dict] = []
@@ -77,6 +91,30 @@ def _df_to_records(merged_df, aa_seqs: dict[str, str]) -> list[dict]:
             "j_tstart": row.get("j_tstart"),
         }
         records.append(rec)
+    return records
+
+
+def _annotations_to_records(
+    aa_seqs: dict[str, str],
+    pre_annotations: dict[str, dict],
+    seq_ids: set[str],
+) -> list[dict]:
+    """Build reconstruction records directly from pre-supplied annotations."""
+    records: list[dict] = []
+    for sid in seq_ids:
+        ann = pre_annotations.get(sid, {})
+        records.append({
+            "seq_id": sid,
+            "aa_seq": aa_seqs[sid],
+            "v_call":   ann.get("v_call"),
+            "v_qstart": ann.get("v_qstart"),
+            "v_qend":   ann.get("v_qend"),
+            "v_tstart": ann.get("v_tstart"),
+            "j_call":   ann.get("j_call"),
+            "j_qstart": ann.get("j_qstart"),
+            "j_qend":   ann.get("j_qend"),
+            "j_tstart": ann.get("j_tstart"),
+        })
     return records
 
 
@@ -104,8 +142,24 @@ def reverse_translate(
     Parameters
     ----------
     sequences:
-        FASTA file path, a single abutils.Sequence, or an iterable of
-        abutils.Sequence objects (or plain strings).
+        Any of the following:
+
+        * **FASTA file path** (``.fasta`` / ``.fa``): one sequence per record.
+        * **CSV / TSV file path**: auto-detected format —
+
+          - *Simple CSV*: first column = sequence ID, second column = AA sequence.
+          - *AIRR TSV/CSV*: AIRR-standard columns (``sequence_id``,
+            ``sequence_aa``, ``v_call``, ``j_call``, …).  If germline gene
+            calls are present the MMseqs2 search is skipped for those
+            sequences; if AIRR alignment coordinates are also present they
+            are used directly for germline-informed codon selection.
+          - *PairPlex TSV/CSV*: paired output with ``:0`` / ``:1`` column
+            suffixes.  Each antibody row is split into two chain records.
+            Pre-supplied gene calls and coordinates are handled identically
+            to the AIRR path.
+
+        * **abutils.Sequence** (single or iterable).
+        * **Iterable of plain strings** (sequences only; IDs auto-assigned).
     species:
         Germline species.  Currently only 'human' is supported.
     receptor:
@@ -140,58 +194,80 @@ def reverse_translate(
 
     # 1. Normalise input
     _log("Normalising input sequences …")
-    aa_seqs = _normalise_input(sequences)
+    aa_seqs, pre_annotations = _normalise_input(sequences)
     if not aa_seqs:
         return []
     input_order = list(aa_seqs.keys())
     _log(f"  {len(aa_seqs):,} sequences")
 
+    # Separate sequences: those with pre-supplied gene calls skip MMseqs2.
+    annotated_ids = {
+        sid for sid, ann in pre_annotations.items()
+        if ann.get("v_call") is not None or ann.get("j_call") is not None
+    }
+    unannotated_ids = {sid for sid in aa_seqs if sid not in annotated_ids}
+
+    if annotated_ids:
+        _log(
+            f"  {len(annotated_ids):,} sequences have pre-supplied gene calls "
+            f"(MMseqs2 search skipped for these)"
+        )
+
     with tempfile.TemporaryDirectory(prefix="abverse_") as tmpdir:
-        # 2. Build / load germline AA databases
+        # 2. Build / load germline AA databases (always needed for NT codon lookup)
         _log("Loading germline AA databases …")
         db = build_germline_aa_db(species=species, receptor=receptor, force_rebuild=force_rebuild_db)
 
-        # 3. Write AA query FASTA
-        aa_fasta = os.path.join(tmpdir, "query_aa.fasta")
-        _write_aa_fasta(aa_seqs, aa_fasta)
+        records: list[dict] = []
 
-        # 4. V search
-        _log("Running V germline search …")
-        v_result_path = os.path.join(tmpdir, "v_results.tsv")
-        v_df = search_v_germline(
-            query_fasta=aa_fasta,
-            v_db_path=db["v_db_path"],
-            output_path=v_result_path,
-            threads=threads,
-        )
-        _log(f"  {len(v_df):,} V assignments")
+        # 3a. Records from pre-annotations (no MMseqs2)
+        if annotated_ids:
+            records.extend(
+                _annotations_to_records(aa_seqs, pre_annotations, annotated_ids)
+            )
 
-        # 5. Build J query FASTA (post-V region)
-        j_query_fasta = os.path.join(tmpdir, "j_query.fasta")
-        build_j_query_fasta(
-            v_results=v_df,
-            input_aa_seqs=aa_seqs,
-            output_path=j_query_fasta,
-        )
+        # 3b. Records from MMseqs2 search for unannotated sequences
+        if unannotated_ids:
+            unannotated_seqs = {sid: aa_seqs[sid] for sid in unannotated_ids}
 
-        # 6. J search
-        _log("Running J germline search …")
-        j_result_path = os.path.join(tmpdir, "j_results.tsv")
-        j_df = search_j_germline(
-            j_query_fasta=j_query_fasta,
-            j_db_path=db["j_db_path"],
-            output_path=j_result_path,
-            threads=threads,
-        )
-        _log(f"  {len(j_df):,} J assignments")
+            # Write AA query FASTA
+            aa_fasta = os.path.join(tmpdir, "query_aa.fasta")
+            _write_aa_fasta(unannotated_seqs, aa_fasta)
 
-        # 7. Merge V + J results
-        merged_df = merge_vj_results(v_df, j_df, aa_seqs)
+            # V search
+            _log("Running V germline search …")
+            v_result_path = os.path.join(tmpdir, "v_results.tsv")
+            v_df = search_v_germline(
+                query_fasta=aa_fasta,
+                v_db_path=db["v_db_path"],
+                output_path=v_result_path,
+                threads=threads,
+            )
+            _log(f"  {len(v_df):,} V assignments")
 
-        # 8. Build records for reconstruction
-        records = _df_to_records(merged_df, aa_seqs)
+            # Build J query FASTA (post-V region)
+            j_query_fasta = os.path.join(tmpdir, "j_query.fasta")
+            build_j_query_fasta(
+                v_results=v_df,
+                input_aa_seqs=unannotated_seqs,
+                output_path=j_query_fasta,
+            )
 
-        # 9. Dispatch reconstruction in parallel
+            # J search
+            _log("Running J germline search …")
+            j_result_path = os.path.join(tmpdir, "j_results.tsv")
+            j_df = search_j_germline(
+                j_query_fasta=j_query_fasta,
+                j_db_path=db["j_db_path"],
+                output_path=j_result_path,
+                threads=threads,
+            )
+            _log(f"  {len(j_df):,} J assignments")
+
+            merged_df = merge_vj_results(v_df, j_df, unannotated_seqs)
+            records.extend(_df_to_records(merged_df, unannotated_seqs))
+
+        # 4. Dispatch reconstruction in parallel
         _log(f"Reconstructing NT sequences (workers={n_processes}) …")
         chunks = _chunk_records(records, chunksize)
 
@@ -266,11 +342,11 @@ def reverse_translate(
                         else:
                             results_by_id[res.id] = res
 
-    # 10. Return in input order
+    # 5. Return in input order
     _log("Done.")
     ordered = [results_by_id[sid] for sid in input_order if sid in results_by_id]
 
-    # 11. Optional FASTA write
+    # 6. Optional FASTA write
     if output_fasta is not None:
         abutils.io.to_fasta(ordered, output_fasta)
 
