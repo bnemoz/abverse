@@ -38,6 +38,7 @@ jobs:
                            abverse/tests/test_germline_db.py \
                            abverse/tests/test_reconstruct.py \
                            abverse/tests/test_pipeline.py \
+                           abverse/tests/test_csv.py \
                            -v
 
   # ── Build source distribution and wheel ───────────────────────────────────
