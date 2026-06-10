@@ -2,9 +2,9 @@ name: Publish to PyPI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
   release:
     types: [published]
 
@@ -39,6 +39,7 @@ jobs:
                            abverse/tests/test_reconstruct.py \
                            abverse/tests/test_pipeline.py \
                            abverse/tests/test_csv.py \
+                           abverse/tests/test_errors.py \
                            -v
 
   # ── Build source distribution and wheel ───────────────────────────────────
