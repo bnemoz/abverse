@@ -146,14 +146,13 @@ OPTIMAL_CODON_TABLE: dict[tuple[str, str], str] = _build_optimal_codon_lookup()
 def optimal_codon(target_aa: str, germline_codon: str) -> str:
     """Return the synonymous codon for *target_aa* closest (Hamming) to *germline_codon*.
 
-    Ties broken by human codon frequency. O(1) lookup.
-    Returns 'NNN' for non-standard amino acids (X, B, Z, U).
+    Ties broken by human codon frequency. O(1) lookup. Input is assumed
+    pre-validated to the 20 standard amino acids; a non-standard residue
+    raises (via :func:`fallback_codon`).
     """
     if len(germline_codon) != 3:
         return fallback_codon(target_aa)
     germline_codon = germline_codon.upper()
-    if target_aa in ("X", "B", "Z", "U"):
-        return "NNN"
     result = OPTIMAL_CODON_TABLE.get((target_aa, germline_codon))
     if result is None:
         # germline_codon contains ambiguous bases — fall back to frequency
@@ -165,8 +164,10 @@ def fallback_codon(target_aa: str) -> str:
     """Return the most frequent human codon for *target_aa*.
 
     Used for CDR3, overhangs, and positions without a valid germline codon.
-    Returns 'NNN' for non-standard amino acids.
+    Input is assumed pre-validated; a non-standard residue raises ``ValueError``
+    rather than silently producing junk.
     """
-    if target_aa in ("X", "B", "Z", "U"):
-        return "NNN"
-    return HUMAN_PREFERRED_CODON.get(target_aa, "NNN")
+    try:
+        return HUMAN_PREFERRED_CODON[target_aa]
+    except KeyError:
+        raise ValueError(f"No codon for non-standard residue {target_aa!r}")

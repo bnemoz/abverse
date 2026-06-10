@@ -38,10 +38,10 @@ class TestTranslateNt:
 class TestReconstructSequence:
     def test_simple_v_and_j(self):
         v_nt_seqs, j_nt_seqs, v_frame_map, j_frame_map = _build_simple_db()
-        # AA: Q V Q X X W G Q   (X = CDR3)
+        # AA: Q V Q A R W G Q   (A R = CDR3, standard residues)
         # V covers pos 0..2 (QVQ), J covers pos 5..7 relative to post-V = abs 3..5 wait…
         # post-V starts at v_qend+1 = 3; j_qstart=0 → abs j_start = 3
-        aa_seq = "QVQXXWGQ"
+        aa_seq = "QVQARWGQ"
         result = reconstruct_sequence(
             seq_id="test",
             aa_seq=aa_seq,
@@ -120,24 +120,22 @@ class TestReconstructSequence:
                 j_frame_map=j_frame_map,
             )
 
-    def test_nonstandard_aa_returns_nnn(self):
+    def test_nonstandard_aa_raises(self):
+        # Reconstruction assumes input is already validated; a non-standard
+        # residue reaching this layer is a genuine error and must raise, not
+        # silently pass through as NNN.
         v_nt_seqs, j_nt_seqs, v_frame_map, j_frame_map = _build_simple_db()
-        aa_seq = "MXK"
-        result = reconstruct_sequence(
-            seq_id="nonstandard",
-            aa_seq=aa_seq,
-            v_call=None, v_qstart=None, v_qend=None, v_tstart=None,
-            j_call=None, j_qstart=None, j_qend=None, j_tstart=None,
-            v_nt_seqs=v_nt_seqs,
-            j_nt_seqs=j_nt_seqs,
-            v_frame_map=v_frame_map,
-            j_frame_map=j_frame_map,
-        )
-        nt = result.sequence
-        # Middle codon should be NNN
-        assert nt[3:6] == "NNN"
-        # Overall translate with X for NNN
-        assert _translate_nt(nt) == "MXK"
+        with pytest.raises((KeyError, ValueError)):
+            reconstruct_sequence(
+                seq_id="nonstandard",
+                aa_seq="MXK",
+                v_call=None, v_qstart=None, v_qend=None, v_tstart=None,
+                j_call=None, j_qstart=None, j_qend=None, j_tstart=None,
+                v_nt_seqs=v_nt_seqs,
+                j_nt_seqs=j_nt_seqs,
+                v_frame_map=v_frame_map,
+                j_frame_map=j_frame_map,
+            )
 
     def test_vj_overlap_v_priority(self):
         """When J abs start overlaps with V end, V takes priority and J begins after V."""

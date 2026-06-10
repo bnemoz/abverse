@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import os
 import tempfile
-import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Iterable, Optional, Union
 
 import abutils
 
 from ._csv import parse_csv
+from ._errors import ReverseTranslationError
 from ._germline_db import build_germline_aa_db
 from ._reconstruct import _reconstruct_batch
 from ._search import (
@@ -64,6 +64,39 @@ def _normalise_input(
             raise TypeError(f"Unsupported sequence type: {type(s)}")
         result[sid] = seq
     return result, {}
+
+
+_STANDARD_AA = frozenset("ACDEFGHIKLMNPQRSTVWY")
+
+
+def _validate_residues(aa_seqs: dict[str, str]) -> list[dict]:
+    """Return a list of ``invalid_residue`` failure dicts (empty if all valid).
+
+    Only the 20 standard amino acids are accepted. Any other character
+    (``X``, ``B``, ``Z``, ``U``, ``O``, ``*``, …) is reported. Positions in the
+    detail message are 1-indexed for readability, grouped by offending residue.
+    """
+    failures: list[dict] = []
+    for sid, seq in aa_seqs.items():
+        bad: dict[str, list[int]] = {}
+        for i, aa in enumerate(seq):
+            if aa not in _STANDARD_AA:
+                bad.setdefault(aa, []).append(i + 1)  # 1-indexed
+        if not bad:
+            continue
+        parts: list[str] = []
+        for residue, positions in bad.items():
+            if len(positions) == 1:
+                parts.append(f"'{residue}' at position {positions[0]}")
+            else:
+                joined = ", ".join(str(p) for p in positions)
+                parts.append(f"'{residue}' at positions {joined}")
+        failures.append({
+            "seq_id": sid,
+            "kind": "invalid_residue",
+            "detail": "; ".join(parts),
+        })
+    return failures
 
 
 def _write_aa_fasta(aa_seqs: dict[str, str], path: str) -> None:
@@ -182,8 +215,15 @@ def reverse_translate(
     -------
     list[abutils.Sequence]
         Reconstructed NT sequences in the same order as the input.
-        Sequences that fail reconstruction are replaced with a Sequence
-        containing 'N' * (3 * len(aa_seq)) and annotated with the error.
+
+    Raises
+    ------
+    ReverseTranslationError
+        If any input sequence contains a residue outside the 20 standard
+        amino acids, or if reconstruction fails for any sequence. All failures
+        are collected and reported together; the error's ``.failures`` attribute
+        lists each offending sequence id, kind, and detail. Input is validated
+        before any germline/MMseqs2 work, so bad input fails fast.
     """
     if n_processes is None:
         n_processes = os.cpu_count() or 1
@@ -197,6 +237,13 @@ def reverse_translate(
     aa_seqs, pre_annotations = _normalise_input(sequences)
     if not aa_seqs:
         return []
+
+    # Validate residues upfront across every input path; collect all failures
+    # and raise one comprehensive error before doing any germline/MMseqs2 work.
+    residue_failures = _validate_residues(aa_seqs)
+    if residue_failures:
+        raise ReverseTranslationError(residue_failures)
+
     input_order = list(aa_seqs.keys())
     _log(f"  {len(aa_seqs):,} sequences")
 
@@ -272,6 +319,11 @@ def reverse_translate(
         chunks = _chunk_records(records, chunksize)
 
         results_by_id: dict[str, abutils.Sequence] = {}
+        # Reconstruction failures are collected and raised together. Post input
+        # validation these should essentially never fire for legitimate input,
+        # so a raise here surfaces a genuine bug immediately rather than emitting
+        # junk that fails downstream.
+        recon_failures: list[dict] = []
 
         if n_processes == 1 or len(records) <= chunksize:
             # Single-process path (avoids spawn overhead for small inputs)
@@ -284,15 +336,11 @@ def reverse_translate(
             )
             for rec, res in zip(records, batch_results):
                 if isinstance(res, Exception):
-                    warnings.warn(
-                        f"Reconstruction failed for '{rec['seq_id']}': {res}",
-                        stacklevel=2,
-                    )
-                    fallback = abutils.Sequence(
-                        "N" * (3 * len(rec["aa_seq"])), id=rec["seq_id"]
-                    )
-                    fallback["reconstruction_error"] = str(res)
-                    results_by_id[rec["seq_id"]] = fallback
+                    recon_failures.append({
+                        "seq_id": rec["seq_id"],
+                        "kind": "reconstruction_error",
+                        "detail": str(res),
+                    })
                 else:
                     results_by_id[res.id] = res
         else:
@@ -316,31 +364,26 @@ def reverse_translate(
                     try:
                         batch_results = future.result()
                     except Exception as exc:
-                        # Entire chunk failed — mark all as error
+                        # Entire chunk failed — record every record in it
                         for rec in chunk:
-                            warnings.warn(
-                                f"Batch failed for chunk starting at '{chunk[0]['seq_id']}': {exc}",
-                                stacklevel=2,
-                            )
-                            fallback = abutils.Sequence(
-                                "N" * (3 * len(rec["aa_seq"])), id=rec["seq_id"]
-                            )
-                            fallback["reconstruction_error"] = str(exc)
-                            results_by_id[rec["seq_id"]] = fallback
+                            recon_failures.append({
+                                "seq_id": rec["seq_id"],
+                                "kind": "reconstruction_error",
+                                "detail": str(exc),
+                            })
                         continue
                     for rec, res in zip(chunk, batch_results):
                         if isinstance(res, Exception):
-                            warnings.warn(
-                                f"Reconstruction failed for '{rec['seq_id']}': {res}",
-                                stacklevel=2,
-                            )
-                            fallback = abutils.Sequence(
-                                "N" * (3 * len(rec["aa_seq"])), id=rec["seq_id"]
-                            )
-                            fallback["reconstruction_error"] = str(res)
-                            results_by_id[rec["seq_id"]] = fallback
+                            recon_failures.append({
+                                "seq_id": rec["seq_id"],
+                                "kind": "reconstruction_error",
+                                "detail": str(res),
+                            })
                         else:
                             results_by_id[res.id] = res
+
+        if recon_failures:
+            raise ReverseTranslationError(recon_failures)
 
     # 5. Return in input order
     _log("Done.")
