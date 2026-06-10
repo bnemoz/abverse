@@ -149,9 +149,15 @@ The exact V-call rate of 75% reflects the fundamental ambiguity of assigning a s
 | No J assignment | Germline lookup for V region; fallback elsewhere |
 | 5′ / 3′ overhangs | Human codon frequency |
 | Germline codon truncated at gene edge | Human codon frequency |
-| Non-standard AA (X, B, Z) | `NNN` |
-| Stop codon in input AA | `ValueError` with position and sequence ID |
+| Non-standard AA (X, B, Z, U, O, …) | Rejected with a `ReverseTranslationError` naming each sequence and the offending positions. Only the 20 standard amino acids are accepted. |
+| Stop codon (`*`) in input AA | Rejected with a `ReverseTranslationError` (reported as an invalid residue, with position and sequence ID). |
 | V/J alignment overlap | V takes priority; J starts after V end |
+
+Input is validated upfront: all offending sequences across every input format
+(FASTA, CSV, `abutils.Sequence`, plain strings) are collected and reported in a
+single `ReverseTranslationError` before any germline search runs. The error's
+`.failures` attribute exposes the failures as a structured list for programmatic
+handling.
 
 ---
 

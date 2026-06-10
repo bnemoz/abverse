@@ -82,10 +82,10 @@ class TestOptimalCodonFunction:
         # ATG encodes M; optimal_codon('M', 'ATG') == 'ATG'
         assert optimal_codon("M", "ATG") == "ATG"
 
-    def test_nonstandard_aa_returns_nnn(self):
-        assert optimal_codon("X", "ATG") == "NNN"
-        assert optimal_codon("B", "ATG") == "NNN"
-        assert optimal_codon("Z", "ATG") == "NNN"
+    def test_nonstandard_aa_raises(self):
+        for aa in ("X", "B", "Z", "U", "O"):
+            with pytest.raises(ValueError):
+                optimal_codon(aa, "ATG")
 
     def test_ambiguous_germline_codon(self):
         # Should not crash; falls back to human preferred codon
@@ -104,6 +104,7 @@ class TestFallbackCodon:
                 continue
             assert fallback_codon(aa) == codon
 
-    def test_nonstandard_aa(self):
-        assert fallback_codon("X") == "NNN"
-        assert fallback_codon("B") == "NNN"
+    def test_nonstandard_aa_raises(self):
+        for aa in ("X", "B", "Z", "U", "O"):
+            with pytest.raises(ValueError):
+                fallback_codon(aa)

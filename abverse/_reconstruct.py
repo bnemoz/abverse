@@ -107,10 +107,6 @@ def reconstruct_sequence(
     method_parts: list[str] = []
 
     for i, aa in enumerate(aa_seq):
-        if aa in ("X", "B", "Z", "U"):
-            nt_out[i] = "NNN"
-            continue
-
         # ── V region ────────────────────────────────────────────────────────
         if has_v and v_qstart <= i <= v_qend and v_nt is not None:
             aa_offset = i - v_qstart  # position within the aligned region
